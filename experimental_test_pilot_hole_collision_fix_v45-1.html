@@ -1,0 +1,936 @@
+<!doctype html><html><head>
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>Experimental Flight Program v1.6</title>
+<style>
+*{box-sizing:border-box;-webkit-user-select:none;user-select:none;-webkit-touch-callout:none}
+html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#050914;color:#fff;font-family:system-ui;touch-action:none}
+canvas{display:block;width:100vw;height:100vh}
+.top{position:fixed;top:0;left:0;right:0;display:flex;justify-content:space-between;padding:9px 11px;font-size:13px;font-weight:900;text-shadow:0 2px 5px #000;pointer-events:none}
+.progress{position:fixed;top:38px;left:20%;right:20%;height:8px;border:1px solid #fff8;background:#0005;border-radius:8px;overflow:hidden;pointer-events:none}.progress i{display:block;height:100%;width:0;background:#fff}
+.pad{position:fixed;left:14px;bottom:14px;width:166px;height:166px}.b{position:absolute;width:64px;height:64px;border:2px solid #fff;border-radius:14px;background:#222c;color:#fff;font-size:34px;font-weight:900;touch-action:none}.up{left:51px}.down{left:51px;bottom:0}.left{left:0;top:51px}.right{right:0;top:51px}
+.msg{position:fixed;inset:0;background:#000d;display:flex;align-items:center;justify-content:center;flex-direction:column;text-align:center;padding:24px;z-index:5}.msg h1{font-size:35px;margin:0 0 10px}.msg p{max-width:600px;line-height:1.5}.msg button{font-size:20px;font-weight:850;border:0;border-radius:12px;padding:12px 24px}.hide{display:none}
+</style></head><body>
+<canvas id="c"></canvas>
+<div class="top"><div id="lev">LEVEL 1</div><div>EXPERIMENTAL FLIGHT TEST</div><div id="spd">SPEED 0</div></div>
+<div class="progress"><i id="bar"></i></div>
+
+<div id="msg" class="msg"><h1>EXPERIMENTAL FLIGHT PROGRAM</h1><p>You are a <b>test pilot</b> flying an experimental prototype through a orbital high-speed maneuverability course.<br><br>Each illuminated test barrier has a precision opening — rectangular, circular, or triangular. The wall and its opening appear small in the distance and <b>grow larger as you approach</b>. Track each moving aperture against the barrier grid, line up the prototype, and thread the opening. Some stay centered; others move left, right, up, or down from that shared starting point.<br><br>Touch anywhere on the game and <b>drag your finger</b> to steer. Drag your finger to steer the prototype. It banks and responds directly to your movement.<br><br>Line yourself up and pass through. The walls come quickly — clear one and immediately read the next.</p><button id="start">PLAY</button></div>
+<script>
+const c=document.getElementById('c'),x=c.getContext('2d'),msg=document.getElementById('msg'),bar=document.getElementById('bar'),lev=document.getElementById('lev'),spd=document.getElementById('spd');
+let W,H,run=false,last=0,t=0,z=0,px=0,py=0,speed=60,level=1,keys={},walls=[],finishZ=1650,target={},drag=false,targetPX=0,targetPY=0,exploding=false,objects=[],roomShapes=[],lastRoom=-1,roomNotice='',roomNoticeUntil=0,lives=3,invulnUntil=0,crossFX=0,crossWall=null,score=0,bestScore=Number(localStorage.getItem('testPilotBest')||0);
+const rand=(a,b)=>a+Math.random()*(b-a), cols=['#16354d','#3d294d','#4b4328','#263c55','#17433f'];
+function resize(){W=c.width=innerWidth*devicePixelRatio;H=c.height=innerHeight*devicePixelRatio;x.setTransform(devicePixelRatio,0,0,devicePixelRatio,0,0);W=innerWidth;H=innerHeight}addEventListener('resize',resize);resize();
+
+function build(){
+ walls=[];let n=Math.min(8+Math.floor(level/2),13),gap=205;
+ for(let i=0;i<n;i++)walls.push({z:175+i*gap,color:cols[i%cols.length],motion:i===0?0:(i%3),phase:rand(0,6.28),baseX:0,baseY:0,shape:(i>5&&i%7===0?7:i>3&&i%5===0?6:i===3?3:i===5?4:i===7?5:i%3),style:i%5,passed:false});
+ finishZ=175+n*gap+135;target={x:rand(-.55,.55),y:rand(-.28,.28),z:finishZ};
+ objects=[];
+ // ASTEROIDS ARE ROOM EVENTS, not a permanent field.
+ // Early rooms are clean. Only selected later rooms contain asteroid challenges.
+ for(let room=1;room<n;room++){
+   let progress=room/(n-1);
+   let asteroidRoom =
+     progress>=.18 &&
+     (
+       progress<.42 ? ((room+level)%3===1) :
+       progress<.68 ? ((room+level)%3!==0) :
+                       ((room+level)%5!==0)
+     );
+   if(!asteroidRoom) continue;
+
+   // Density rises across the much longer course.
+   let count=
+     progress<.32 ? 1 :
+     progress<.46 ? 2 :
+     progress<.60 ? 3 :
+     progress<.74 ? 4 :
+     progress<.88 ? 5 : 7;
+   count+=Math.min(2,Math.floor((level-1)/3));
+
+   // Keep them physically inside this room, well clear of both barrier planes.
+   let roomStart=walls[room-1].z+34;
+   let roomEnd=walls[room].z-38;
+   for(let j=0;j<count;j++){
+     let oz=roomStart+(roomEnd-roomStart)*(j+1)/(count+1);
+     objects.push({
+       z:oz,room:room,
+       x:rand(-1.12,1.12),y:rand(-.44,.44),
+       size:rand(.14, progress>.78?.26:.23),
+       phase:rand(0,6.28),spin:rand(-1.2,1.2),
+       passed:false
+     });
+   }
+ }
+
+ // CLEAN ROOMS can still contain geometric test obstacles.
+ // These are physical objects to dodge, not holes in a wall.
+ roomShapes=[];
+ for(let room=1;room<n;room++){
+   let progress=room/(n-1);
+   if(progress<.22) continue;
+   let hasAsteroids=objects.some(o=>o.room===room);
+   if(hasAsteroids) continue;
+
+   // Not every clean room gets shapes; some remain breathing-space rooms.
+   if((room+level)%3===0) continue;
+
+   let count=progress<.55?1:progress<.78?2:3;
+   let roomStart=walls[room-1].z+35,roomEnd=walls[room].z-38;
+   for(let j=0;j<count;j++){
+     roomShapes.push({
+       room:room,
+       z:roomStart+(roomEnd-roomStart)*(j+1)/(count+1),
+       x:rand(-1.08,1.08),y:rand(-.42,.42),
+       kind:(room+j+level)%3, // rectangle, circle, square
+       size:rand(.16,.23),
+       phase:rand(0,6.28),
+       passed:false
+     });
+   }
+ }
+}
+function hole(w){
+ let hx=w.baseX,hy=w.baseY;
+ if(w.motion===1)hx+=Math.sin(t*1.15+w.phase)*.62;
+ if(w.motion===2)hy+=Math.sin(t*1.25+w.phase)*.38;
+ return[hx,hy];
+}
+// Real perspective: wall plane has fixed world dimensions; projection makes it grow as dz shrinks.
+function scaleAt(wz){let dz=wz-z;if(dz<=3)return null;return Math.min(7,230/dz)}
+function screenPoint(wx,wy,wz){let s=scaleAt(wz);if(!s)return null;return[W/2+(wx-px)*155*s,H/2+(wy-py)*155*s,s]}
+function corridor(){
+ // SPACE TEST TUNNEL — walls/barriers remain unchanged.
+ let bg=x.createRadialGradient(W/2,H*.48,10,W/2,H*.48,Math.max(W,H)*.75);
+ bg.addColorStop(0,'#102443');bg.addColorStop(.45,'#071323');bg.addColorStop(1,'#02050b');
+ x.fillStyle=bg;x.fillRect(0,0,W,H);
+
+ // Deep-space view panels on the left and right sides of the tunnel.
+ x.save();
+ x.beginPath();x.moveTo(0,0);x.lineTo(W*.28,H*.27);x.lineTo(W*.28,H*.73);x.lineTo(0,H);x.closePath();x.clip();
+ let lg=x.createLinearGradient(0,0,W*.28,H);lg.addColorStop(0,'#091528');lg.addColorStop(1,'#140c2c');x.fillStyle=lg;x.fillRect(0,0,W*.3,H);
+ for(let i=0;i<42;i++){let sx=(i*73%997)/997*W*.28,sy=(i*137%991)/991*H,sz=1+(i%3);x.fillStyle=i%7===0?'#8fdcff':'#fff';x.globalAlpha=.35+(i%5)*.12;x.fillRect(sx,sy,sz,sz)}
+ x.globalAlpha=1;x.restore();
+
+ x.save();
+ x.beginPath();x.moveTo(W,0);x.lineTo(W*.72,H*.27);x.lineTo(W*.72,H*.73);x.lineTo(W,H);x.closePath();x.clip();
+ let rg=x.createLinearGradient(W,0,W*.72,H);rg.addColorStop(0,'#081427');rg.addColorStop(1,'#211039');x.fillStyle=rg;x.fillRect(W*.7,0,W*.3,H);
+ for(let i=0;i<42;i++){let sx=W*.72+(i*89%983)/983*W*.28,sy=(i*151%977)/977*H,sz=1+(i%3);x.fillStyle=i%8===0?'#d4a8ff':'#fff';x.globalAlpha=.32+(i%5)*.12;x.fillRect(sx,sy,sz,sz)}
+ x.globalAlpha=1;x.restore();
+
+ // Metallic ceiling with illuminated structural ribs.
+ let cg=x.createLinearGradient(0,0,0,H*.27);cg.addColorStop(0,'#182738');cg.addColorStop(1,'#0a111b');
+ x.fillStyle=cg;x.beginPath();x.moveTo(0,0);x.lineTo(W,0);x.lineTo(W*.72,H*.27);x.lineTo(W*.28,H*.27);x.closePath();x.fill();
+
+ // Metallic floor.
+ let fg=x.createLinearGradient(0,H*.73,0,H);fg.addColorStop(0,'#101923');fg.addColorStop(1,'#03070c');
+ x.fillStyle=fg;x.beginPath();x.moveTo(0,H);x.lineTo(W,H);x.lineTo(W*.72,H*.73);x.lineTo(W*.28,H*.73);x.closePath();x.fill();
+
+ // Cyan/magenta edge lighting gives the tunnel a futuristic silhouette.
+ x.shadowBlur=12;x.shadowColor='#4deaff';x.strokeStyle='rgba(77,234,255,.75)';x.lineWidth=2;
+ x.beginPath();x.moveTo(0,H);x.lineTo(W*.28,H*.73);x.lineTo(W*.28,H*.27);x.lineTo(0,0);x.stroke();
+ x.beginPath();x.moveTo(W,H);x.lineTo(W*.72,H*.73);x.lineTo(W*.72,H*.27);x.lineTo(W,0);x.stroke();
+ x.shadowBlur=0;
+
+ // Repeating tunnel ribs rush toward the pilot.
+ let ribPhase=(z*.010)%1;
+ for(let i=0;i<9;i++){
+   let q=((i/9)+ribPhase)%1, e=q*q;
+   let left=W*.28*(1-e), right=W-left, top=H*.27*(1-e), bottom=H-H*.27*(1-e);
+   x.strokeStyle=`rgba(105,210,235,${.08+e*.30})`;x.lineWidth=1+e*3;
+   x.strokeRect(left,top,right-left,bottom-top);
+ }
+
+ // Central illuminated runway / test-lane strips.
+ x.strokeStyle='rgba(74,235,255,.82)';x.lineWidth=2.5;
+ x.beginPath();x.moveTo(W*.47,H*.73);x.lineTo(W*.34,H);x.stroke();
+ x.beginPath();x.moveTo(W*.53,H*.73);x.lineTo(W*.66,H);x.stroke();
+
+ // Moving runway calibration bars amplify forward speed.
+ let phase=(z*.015)%1;
+ for(let i=0;i<11;i++){
+   let q=(i+phase)/11,e=q*q,yy=H*.73+(H*.27)*e,half=6+e*42;
+   x.strokeStyle=`rgba(116,240,255,${.12+e*.72})`;x.lineWidth=1+e*3;
+   x.beginPath();x.moveTo(W/2-half,yy);x.lineTo(W/2+half,yy);x.stroke();
+ }
+
+ // Small animated side navigation lights.
+ for(let i=0;i<8;i++){
+   let q=((i/8)+(z*.004)%1)%1,yy=H*.30+q*H*.39;
+   let lx=W*.05+q*W*.18,rx=W-lx;
+   x.shadowBlur=8;x.shadowColor=i%2?'#56eaff':'#c36cff';
+   x.fillStyle=i%2?'#56eaff':'#c36cff';
+   x.beginPath();x.arc(lx,yy,2+q*2,0,Math.PI*2);x.fill();
+   x.beginPath();x.arc(rx,yy,2+q*2,0,Math.PI*2);x.fill();
+ }
+ x.shadowBlur=0;
+}
+function starWindow(cx,cy,hw,hh,shape,seed){
+ x.save();
+ // clip to the aperture, then draw deep space inside it
+ x.beginPath();
+ if(shape===0 || shape===3)x.rect(cx-hw,cy-hh,hw*2,hh*2);
+ else if(shape===1)x.ellipse(cx,cy,hw,hh,0,0,Math.PI*2);
+ else {x.moveTo(cx,cy-hh*1.15);x.lineTo(cx+hw*1.08,cy+hh);x.lineTo(cx-hw*1.08,cy+hh);x.closePath()}
+ x.clip();
+ let g=x.createRadialGradient(cx,cy,2,cx,cy,Math.max(hw,hh)*1.5);
+ g.addColorStop(0,'#183d71');g.addColorStop(.42,'#151342');g.addColorStop(1,'#01030a');x.fillStyle=g;x.fillRect(cx-hw-5,cy-hh-5,hw*2+10,hh*2+10);
+ // faint nebula clouds visible through the aperture
+ x.globalAlpha=.18;x.fillStyle='#b35cff';x.beginPath();x.ellipse(cx-hw*.28,cy+hh*.12,hw*.72,hh*.34,.35,0,Math.PI*2);x.fill();
+ x.fillStyle='#4bdfff';x.beginPath();x.ellipse(cx+hw*.34,cy-hh*.20,hw*.55,hh*.25,-.4,0,Math.PI*2);x.fill();x.globalAlpha=1;
+ for(let i=0;i<28;i++){
+   let fx=((i*47+seed*31)%101)/101,fy=((i*71+seed*17)%97)/97;
+   let sx=cx-hw+fx*hw*2,sy=cy-hh+fy*hh*2,rr=1+(i%3)*.45;
+   x.globalAlpha=.45+(i%5)*.11;x.fillStyle=i%6===0?'#82dfff':'#fff';
+   x.beginPath();x.arc(sx,sy,rr,0,Math.PI*2);x.fill();
+ }
+ x.globalAlpha=1;x.restore();
+}
+
+
+
+
+function currentRoom(){
+ // A room becomes visible ONLY after its entrance wall has actually been cleared.
+ // No proximity-based reveal, so objects cannot pop in while approaching a hole.
+ let r=0;
+ for(let i=0;i<walls.length;i++){
+   if(walls[i].passed) r=i+1;
+   else break;
+ }
+ return r;
+}
+function objectPos(o){
+ // Asteroids remain physical objects in their assigned room, but slowly drift
+ // around their anchor point so the pilot must predict their movement.
+ let ampX=.10+((o.phase*17)%1)*.12;
+ let ampY=.07+((o.phase*29)%1)*.09;
+ let ox=o.x+Math.sin(t*(.42+Math.abs(o.spin)*.22)+o.phase)*ampX;
+ let oy=o.y+Math.cos(t*(.36+Math.abs(o.spin)*.18)+o.phase*1.37)*ampY;
+ return[ox,oy];
+}
+function drawObject(o){
+ if(o.room!==currentRoom())return;
+ let dz=o.z-z;if(dz<-10)return;
+ let [ox,oy]=objectPos(o),p=screenPoint(ox,oy,o.z);if(!p)return;
+ let sc=p[2],r=o.size*155*sc;
+ if(r<1)return;
+
+ // Peripheral motion cue: close asteroids streak toward the screen edge as you pass.
+ let close=Math.max(0,Math.min(1,(78-dz)/78));
+ if(close>.05){
+   let vx=p[0]-W/2,vy=p[1]-H*.60,vm=Math.max(1,Math.hypot(vx,vy));
+   let tail=18+close*75;
+   x.strokeStyle=`rgba(205,220,235,${close*.42})`;
+   x.lineWidth=1+close*4;
+   x.beginPath();x.moveTo(p[0],p[1]);x.lineTo(p[0]+vx/vm*tail,p[1]+vy/vm*tail);x.stroke();
+ }
+ x.save();x.translate(p[0],p[1]);x.rotate(t*o.spin+o.phase);
+ x.shadowBlur=Math.max(2,8*sc);x.shadowColor='rgba(255,170,90,.35)';
+
+ // Irregular rocky silhouette.
+ x.beginPath();
+ let pts=11;
+ for(let i=0;i<pts;i++){
+   let ang=i/pts*Math.PI*2;
+   let wob=.76+(((i*37+Math.floor(o.phase*10))%19)/19)*.32;
+   let rr=r*wob,xx=Math.cos(ang)*rr,yy=Math.sin(ang)*rr;
+   if(i===0)x.moveTo(xx,yy);else x.lineTo(xx,yy);
+ }
+ x.closePath();
+ let g=x.createRadialGradient(-r*.32,-r*.30,r*.08,0,0,r*1.15);
+ g.addColorStop(0,'#9b8a79');g.addColorStop(.45,'#5c5148');g.addColorStop(1,'#242323');
+ x.fillStyle=g;x.fill();
+ x.strokeStyle='rgba(220,205,185,.45)';x.lineWidth=Math.max(1,1.5*sc);x.stroke();
+
+ // Craters.
+ x.fillStyle='rgba(20,18,18,.42)';
+ for(let i=0;i<3;i++){
+   let ang=o.phase+i*2.1,cr=r*(.12+i*.025);
+   x.beginPath();x.ellipse(Math.cos(ang)*r*.38,Math.sin(ang)*r*.34,cr,cr*.65,ang,0,Math.PI*2);x.fill();
+ }
+ x.restore();
+}
+
+
+function drawRoomShape(o){
+ if(o.room!==currentRoom())return;
+ let dz=o.z-z;if(dz<-10)return;
+ let p=screenPoint(o.x,o.y,o.z);if(!p)return;
+ let sc=p[2],r=o.size*155*sc;
+ if(r<1)return;
+
+ // Peripheral speed cue as the geometric obstacle passes.
+ let close=Math.max(0,Math.min(1,(78-dz)/78));
+ if(close>.05){
+   let vx=p[0]-W/2,vy=p[1]-H*.60,vm=Math.max(1,Math.hypot(vx,vy)),tail=16+close*65;
+   x.strokeStyle=`rgba(100,235,255,${close*.38})`;x.lineWidth=1+close*3;
+   x.beginPath();x.moveTo(p[0],p[1]);x.lineTo(p[0]+vx/vm*tail,p[1]+vy/vm*tail);x.stroke();
+ }
+
+ x.save();x.translate(p[0],p[1]);
+ x.shadowBlur=Math.max(3,11*sc);x.shadowColor=o.kind===0?'#55eaff':o.kind===1?'#d778ff':'#ffca62';
+
+ if(o.kind===0){
+   // narrow rectangular test block
+   let rw=r*.62,rh=r*1.42;
+   let g=x.createLinearGradient(-rw,-rh,rw,rh);g.addColorStop(0,'#29495a');g.addColorStop(1,'#101b25');
+   x.fillStyle=g;x.fillRect(-rw,-rh,rw*2,rh*2);
+   x.fillStyle='rgba(110,245,255,.18)';x.fillRect(-rw*.72,-rh*.82,rw*1.44,rh*.18);
+   x.strokeStyle='#69eaff';x.lineWidth=Math.max(1,2.5*sc);x.strokeRect(-rw,-rh,rw*2,rh*2);
+ }else if(o.kind===1){
+   // glowing circular test object
+   let g=x.createRadialGradient(-r*.25,-r*.25,1,0,0,r);g.addColorStop(0,'#e8caff');g.addColorStop(.35,'#8c4fb0');g.addColorStop(1,'#281637');
+   x.fillStyle=g;x.beginPath();x.arc(0,0,r,0,Math.PI*2);x.fill();
+   x.strokeStyle='rgba(225,180,255,.35)';x.beginPath();x.ellipse(0,0,r*.72,r*.28,.4,0,Math.PI*2);x.stroke();
+   x.strokeStyle='#dc83ff';x.lineWidth=Math.max(1,2.5*sc);x.stroke();
+ }else{
+   // compact square test block
+   let g=x.createLinearGradient(-r,-r,r,r);g.addColorStop(0,'#78602a');g.addColorStop(1,'#27200e');
+   x.fillStyle=g;x.fillRect(-r,-r,r*2,r*2);
+   x.strokeStyle='#ffd36d';x.lineWidth=Math.max(1,2.5*sc);x.strokeRect(-r,-r,r*2,r*2);
+   x.strokeStyle='rgba(255,255,255,.22)';x.beginPath();x.moveTo(-r,-r);x.lineTo(r,r);x.moveTo(r,-r);x.lineTo(-r,r);x.stroke();
+ }
+ x.restore();
+}
+
+function apertureScale(){
+ // At the starting speed openings remain essentially unchanged.
+ // Higher velocity progressively reduces clearance.
+ return Math.max(.62, 1 - Math.max(0,speed-55)/520);
+}
+
+
+function drawNextRoomThroughHole(w,cx,cy,hw,hh,shape){
+ let wi=walls.indexOf(w), nextRoom=wi+1;
+ if(nextRoom<1)return;
+
+ x.save();
+ // The aperture is now a literal window into the SAME neon facility.
+ x.beginPath();
+ if(shape===0)x.rect(cx-hw,cy-hh,hw*2,hh*2);
+ else if(shape===1)x.ellipse(cx,cy,hw,hh,0,0,Math.PI*2);
+ else{x.moveTo(cx,cy-hh*1.15);x.lineTo(cx+hw*1.08,cy+hh);x.lineTo(cx-hw*1.08,cy+hh);x.closePath()}
+ x.clip();
+
+ // Next-room interior: dark metallic facility, not outer space.
+ let rg=x.createRadialGradient(cx,cy,2,cx,cy,Math.max(hw,hh)*1.8);
+ rg.addColorStop(0,'#132b43');rg.addColorStop(.55,'#09131f');rg.addColorStop(1,'#03070d');
+ x.fillStyle=rg;x.fillRect(cx-hw-6,cy-hh-6,hw*2+12,hh*2+12);
+
+ // Miniature TRON-style room perspective visible beyond the wall.
+ x.strokeStyle='rgba(73,230,255,.34)';x.lineWidth=1;
+ let vx=cx,vy=cy;
+ for(let i=1;i<6;i++){
+   let f=i/6;
+   let rw=hw*(1-f*.72),rh=hh*(1-f*.72);
+   x.strokeRect(vx-rw,vy-rh,rw*2,rh*2);
+ }
+ // Floor / ceiling rails converge toward the next room.
+ x.strokeStyle='rgba(77,235,255,.45)';
+ x.beginPath();x.moveTo(cx-hw,cy+hh);x.lineTo(cx-hw*.18,cy+hh*.15);x.stroke();
+ x.beginPath();x.moveTo(cx+hw,cy+hh);x.lineTo(cx+hw*.18,cy+hh*.15);x.stroke();
+ x.strokeStyle='rgba(194,84,255,.30)';
+ x.beginPath();x.moveTo(cx-hw,cy-hh);x.lineTo(cx-hw*.18,cy-hh*.15);x.stroke();
+ x.beginPath();x.moveTo(cx+hw,cy-hh);x.lineTo(cx+hw*.18,cy-hh*.15);x.stroke();
+
+ // If the next room actually contains obstacles, show those real obstacles.
+ let roomObjs=[
+   ...objects.filter(o=>o.room===nextRoom).map(o=>({kind:'asteroid',o})),
+   ...roomShapes.filter(o=>o.room===nextRoom).map(o=>({kind:'shape',o}))
+ ].sort((a,b)=>b.o.z-a.o.z);
+
+ for(const item of roomObjs){
+   let o=item.o,p=screenPoint(o.x,o.y,o.z);if(!p)continue;
+   let sc=p[2],r=(o.size||.18)*155*sc;if(r<1)continue;
+   x.save();x.translate(p[0],p[1]);
+   if(item.kind==='asteroid'){
+     x.rotate(t*o.spin+o.phase);
+     x.beginPath();
+     for(let i=0;i<10;i++){
+       let a=i/10*Math.PI*2,rr=r*(.78+((i*31+wi)%17)/55);
+       let xx=Math.cos(a)*rr,yy=Math.sin(a)*rr;
+       if(i===0)x.moveTo(xx,yy);else x.lineTo(xx,yy);
+     }
+     x.closePath();
+     let ag=x.createRadialGradient(-r*.25,-r*.25,1,0,0,r);
+     ag.addColorStop(0,'#998675');ag.addColorStop(1,'#292522');
+     x.fillStyle=ag;x.fill();x.strokeStyle='#b8a28d';x.lineWidth=1;x.stroke();
+   }else{
+     x.fillStyle=o.kind===0?'#29495a':o.kind===1?'#633a7c':'#665326';
+     x.strokeStyle=o.kind===0?'#69eaff':o.kind===1?'#dc83ff':'#ffd36d';x.lineWidth=1.5;
+     if(o.kind===1){x.beginPath();x.arc(0,0,r,0,Math.PI*2);x.fill();x.stroke()}
+     else if(o.kind===0){x.fillRect(-r*.62,-r*1.4,r*1.24,r*2.8);x.strokeRect(-r*.62,-r*1.4,r*1.24,r*2.8)}
+     else{x.fillRect(-r,-r,r*2,r*2);x.strokeRect(-r,-r,r*2,r*2)}
+   }
+   x.restore();
+ }
+
+ // Show the real next barrier at the far side of that room.
+ if(wi+1<walls.length){
+   let nw=walls[wi+1],cp=screenPoint(0,0,nw.z);
+   if(cp){
+     let ns=cp[2],ww=2.6*155*ns,hh2=1.5*155*ns;
+     x.fillStyle='rgba(22,35,49,.58)';x.fillRect(cp[0]-ww/2,cp[1]-hh2/2,ww,hh2);
+     x.strokeStyle='rgba(91,232,255,.55)';x.lineWidth=1.2;x.strokeRect(cp[0]-ww/2,cp[1]-hh2/2,ww,hh2);
+   }
+ }
+ x.restore();
+}
+
+function drawWall(w){
+ let s=scaleAt(w.z);if(!s)return;
+ // wall is a finite rectangular frame inside the gray corridor, not the whole screen
+ let cp=screenPoint(0,0,w.z), wallW=4.0*155*s, wallH=1.85*155*s;
+ let L=cp[0]-wallW/2,T=cp[1]-wallH/2;
+ x.save();
+ // layered metallic barrier face
+ let wg=x.createLinearGradient(L,T,L+wallW,T+wallH);
+ wg.addColorStop(0,w.color);wg.addColorStop(.48,'#253241');wg.addColorStop(1,w.color);
+ x.fillStyle=wg;x.fillRect(L,T,wallW,wallH);
+
+ // inset frame gives the barrier depth
+ let inset=Math.max(2,14*s);
+ x.strokeStyle='rgba(0,0,0,.48)';x.lineWidth=Math.max(2,8*s);
+ x.strokeRect(L+inset,T+inset,wallW-inset*2,wallH-inset*2);
+ x.strokeStyle='rgba(255,255,255,.16)';x.lineWidth=Math.max(1,2*s);
+ x.strokeRect(L+inset*1.25,T+inset*1.25,wallW-inset*2.5,wallH-inset*2.5);
+
+ // different test-wall identities
+ if(w.style===0){
+   // diagonal technical braces
+   x.strokeStyle='rgba(130,230,255,.22)';x.lineWidth=Math.max(1,4*s);
+   for(let q=-1;q<5;q++){x.beginPath();x.moveTo(L+q*wallW/4,T+wallH);x.lineTo(L+(q+2)*wallW/4,T);x.stroke()}
+ } else if(w.style===1){
+   // horizontal armored bands
+   for(let q=1;q<5;q++){let yy=T+wallH*q/5;x.fillStyle=q%2?'rgba(0,0,0,.13)':'rgba(255,255,255,.06)';x.fillRect(L,yy-Math.max(1,5*s),wallW,Math.max(2,10*s))}
+ } else if(w.style===2){
+   // circuit traces
+   x.strokeStyle='rgba(92,255,218,.28)';x.lineWidth=Math.max(1,3*s);
+   for(let q=1;q<5;q++){let yy=T+wallH*q/6;x.beginPath();x.moveTo(L,yy);x.lineTo(L+wallW*.22,yy);x.lineTo(L+wallW*.28,yy+wallH*.07);x.lineTo(L+wallW*.43,yy+wallH*.07);x.stroke()}
+ } else if(w.style===3){
+   // caution chevrons on top and bottom
+   x.strokeStyle='rgba(255,196,60,.42)';x.lineWidth=Math.max(2,7*s);
+   for(let q=0;q<9;q++){let xx=L+q*wallW/9;x.beginPath();x.moveTo(xx,T);x.lineTo(xx+wallW/18,T+Math.max(4,18*s));x.stroke();x.beginPath();x.moveTo(xx,T+wallH);x.lineTo(xx+wallW/18,T+wallH-Math.max(4,18*s));x.stroke()}
+ } else {
+   // glowing vertical energy ribs
+   x.shadowBlur=Math.max(3,10*s);x.shadowColor='#6cecff';x.strokeStyle='rgba(100,235,255,.34)';x.lineWidth=Math.max(1,3*s);
+   for(let q=1;q<7;q++){let xx=L+wallW*q/7;x.beginPath();x.moveTo(xx,T);x.lineTo(xx,T+wallH);x.stroke()}x.shadowBlur=0;
+ }
+ x.strokeStyle='#02060bcc';x.lineWidth=Math.max(1,3*s);x.strokeRect(L,T,wallW,wallH);
+
+ // illuminated barrier edge
+ x.shadowBlur=Math.max(2,8*s);x.shadowColor='#55eaff';
+ x.strokeStyle='rgba(85,232,255,.72)';x.lineWidth=Math.max(1,2*s);x.strokeRect(L,T,wallW,wallH);
+ x.shadowBlur=0;
+ let rim=Math.max(2,6*s);
+ x.strokeStyle='rgba(196,83,255,.28)';x.lineWidth=Math.max(1,1.2*s);
+ x.strokeRect(L+rim,T+rim,wallW-rim*2,wallH-rim*2);
+
+ // hazard blocks make the obstacle read as a manufactured test barrier
+ let hz=Math.max(3,11*s);
+ x.shadowBlur=Math.max(2,7*s);x.shadowColor='#ffb84d';x.fillStyle='rgba(255,190,70,.82)';
+ x.fillRect(L,T,hz*2,hz);x.fillRect(L+wallW-hz*2,T,hz*2,hz);
+ x.fillRect(L,T+wallH-hz,hz*2,hz);x.fillRect(L+wallW-hz*2,T+wallH-hz,hz*2,hz);x.shadowBlur=0;
+
+ // Futuristic spacecraft/station hull detailing.
+ // Layered armor plates.
+ x.strokeStyle='rgba(120,205,235,.22)';x.lineWidth=Math.max(1,1.5*s);
+ let pad=Math.max(2,10*s);
+ x.strokeRect(L+pad,T+pad,wallW-pad*2,wallH-pad*2);
+ x.strokeRect(L+pad*2.2,T+pad*2.2,wallW-pad*4.4,wallH-pad*4.4);
+
+ // Glowing technological channels.
+ x.shadowBlur=Math.max(2,9*s);x.shadowColor='#54eaff';
+ x.strokeStyle='rgba(72,230,255,.48)';x.lineWidth=Math.max(1,2*s);
+ x.beginPath();
+ x.moveTo(L+wallW*.06,T+wallH*.18);x.lineTo(L+wallW*.22,T+wallH*.18);
+ x.lineTo(L+wallW*.27,T+wallH*.25);x.lineTo(L+wallW*.39,T+wallH*.25);
+ x.moveTo(L+wallW*.94,T+wallH*.82);x.lineTo(L+wallW*.78,T+wallH*.82);
+ x.lineTo(L+wallW*.73,T+wallH*.75);x.lineTo(L+wallW*.61,T+wallH*.75);
+ x.stroke();x.shadowBlur=0;
+
+ // Small illuminated status modules.
+ let lamp=Math.max(2,5*s);
+ for(let j=0;j<4;j++){
+   x.fillStyle=j%2?'rgba(197,92,255,.78)':'rgba(73,236,255,.82)';
+   x.fillRect(L+wallW*(.08+j*.055),T+wallH*.09,lamp*1.8,lamp);
+   x.fillRect(L+wallW*(.90-j*.055),T+wallH*.90,lamp*1.8,lamp);
+ }
+
+ // Dark mechanical corner housings.
+ x.fillStyle='rgba(3,9,16,.48)';
+ let cw=wallW*.12,ch=wallH*.12;
+ x.beginPath();x.moveTo(L,T);x.lineTo(L+cw,T);x.lineTo(L,T+ch);x.closePath();x.fill();
+ x.beginPath();x.moveTo(L+wallW,T);x.lineTo(L+wallW-cw,T);x.lineTo(L+wallW,T+ch);x.closePath();x.fill();
+ x.beginPath();x.moveTo(L,T+wallH);x.lineTo(L+cw,T+wallH);x.lineTo(L,T+wallH-ch);x.closePath();x.fill();
+ x.beginPath();x.moveTo(L+wallW,T+wallH);x.lineTo(L+wallW-cw,T+wallH);x.lineTo(L+wallW,T+wallH-ch);x.closePath();x.fill();
+
+ // Micro-panel texture: spacecraft hull plating and luminous circuitry.
+ let tileW=wallW/10,tileH=wallH/7;
+ for(let gy=0;gy<7;gy++){
+   for(let gx=0;gx<10;gx++){
+     if((gx+gy+w.style)%3===0){
+       x.fillStyle='rgba(255,255,255,.025)';
+       x.fillRect(L+gx*tileW+2*s,T+gy*tileH+2*s,tileW-4*s,tileH-4*s);
+     }
+   }
+ }
+
+ // Hex-tech nodes and short circuit traces.
+ x.strokeStyle='rgba(86,232,255,.20)';x.lineWidth=Math.max(1,1.1*s);
+ for(let k=0;k<7;k++){
+   let nx=L+wallW*(.12+(k*.127)% .76),ny=T+wallH*(.16+((k*37)%61)/90);
+   let rr=Math.max(2,7*s);
+   x.beginPath();
+   for(let j=0;j<6;j++){
+     let a=Math.PI/3*j,xx=nx+Math.cos(a)*rr,yy=ny+Math.sin(a)*rr;
+     if(j===0)x.moveTo(xx,yy);else x.lineTo(xx,yy);
+   }
+   x.closePath();x.stroke();
+   x.beginPath();x.moveTo(nx+rr,ny);x.lineTo(nx+rr*3.2,ny);x.lineTo(nx+rr*4.1,ny+rr*.9);x.stroke();
+ }
+
+ // Animated energy conduits make the wall feel powered rather than painted.
+ let energy=.35+.25*Math.sin(t*3.2+w.phase);
+ x.shadowBlur=Math.max(2,10*s);x.shadowColor='#55eaff';
+ x.strokeStyle=`rgba(85,235,255,${energy})`;x.lineWidth=Math.max(1,1.8*s);
+ x.beginPath();
+ x.moveTo(L+wallW*.04,T+wallH*.52);x.lineTo(L+wallW*.18,T+wallH*.52);
+ x.lineTo(L+wallW*.22,T+wallH*.46);x.lineTo(L+wallW*.31,T+wallH*.46);
+ x.moveTo(L+wallW*.96,T+wallH*.48);x.lineTo(L+wallW*.82,T+wallH*.48);
+ x.lineTo(L+wallW*.78,T+wallH*.54);x.lineTo(L+wallW*.69,T+wallH*.54);
+ x.stroke();x.shadowBlur=0;
+
+ // Rivet / docking-light details.
+ for(let k=0;k<12;k++){
+   let rx=L+wallW*(.05+k*.082),ry=(k%2?T+wallH*.055:T+wallH*.945);
+   x.fillStyle=k%3===0?'rgba(205,100,255,.72)':'rgba(90,235,255,.68)';
+   x.beginPath();x.arc(rx,ry,Math.max(1.2,2.8*s),0,Math.PI*2);x.fill();
+ }
+
+ // Fixed panel grid gives the eye a stationary reference for hole movement.
+ x.strokeStyle='rgba(255,255,255,.24)';x.lineWidth=Math.max(1,1.4*s);
+ for(let i=1;i<8;i++){
+   let gx=L+wallW*i/8;
+   x.beginPath();x.moveTo(gx,T);x.lineTo(gx,T+wallH);x.stroke();
+ }
+ for(let i=1;i<5;i++){
+   let gy=T+wallH*i/5;
+   x.beginPath();x.moveTo(L,gy);x.lineTo(L+wallW,gy);x.stroke();
+ }
+
+ // Permanent center cross: this never follows the hole.
+ let center=screenPoint(0,0,w.z);
+ let mark=Math.max(3,10*s);
+ x.strokeStyle='rgba(255,255,255,.75)';x.lineWidth=Math.max(1.5,2*s);
+ x.beginPath();x.moveTo(center[0]-mark,center[1]);x.lineTo(center[0]+mark,center[1]);
+ x.moveTo(center[0],center[1]-mark);x.lineTo(center[0],center[1]+mark);x.stroke();
+
+ // apertures: deep-space windows inside the manufactured barrier
+ let [hx,hy]=hole(w);
+
+ if(w.shape>=3 && w.shape!==6){
+   // Multi-route pattern walls. Same mechanics, different visual/skill problems.
+   let routes=[];
+   if(w.shape===3) routes=[[-.72,0,.19,.31],[0,0,.19,.31],[.72,0,.19,.31]]; // 3 vertical slots
+   if(w.shape===4) routes=[[-.58,-.24,.23,.18],[.58,.24,.23,.18],[-.58,.24,.23,.18],[.58,-.24,.23,.18]]; // 4-corner grid
+   if(w.shape===5) routes=[[-.78,.24,.20,.18],[0,-.24,.20,.18],[.78,.24,.20,.18]]; // zig-zag
+   if(w.shape===7) routes=[[-.66,0,.135,.52],[0,0,.135,.52],[.66,0,.135,.52]]; // three tall narrow slits
+   for(let j=0;j<routes.length;j++){
+     let r=routes[j],ap=apertureScale(),hp=screenPoint(r[0],r[1],w.z),rw=r[2]*ap*155*s,rh=r[3]*ap*155*s;
+     x.globalCompositeOperation='destination-out';x.fillRect(hp[0]-rw,hp[1]-rh,rw*2,rh*2);
+     x.globalCompositeOperation='source-over';
+     drawNextRoomThroughHole(w,hp[0],hp[1],rw,rh,0);
+     x.shadowBlur=Math.max(4,16*s);x.shadowColor='#78efff';
+     x.strokeStyle='rgba(190,250,255,.9)';x.lineWidth=Math.max(1.5,3*s);
+     x.strokeRect(hp[0]-rw,hp[1]-rh,rw*2,rh*2);x.shadowBlur=0;
+   }
+ } else {
+   let ap=apertureScale(),hp=screenPoint(hx,hy,w.z);
+   let precision=(w.shape===6?.72:1);
+   let hw=.24*precision*ap*155*s,hh=.20*precision*ap*155*s;
+   x.globalCompositeOperation='destination-out';
+   if(w.shape===0||w.shape===6)x.fillRect(hp[0]-hw,hp[1]-hh,hw*2,hh*2);
+   else if(w.shape===1){x.beginPath();x.ellipse(hp[0],hp[1],hw,hh,0,0,Math.PI*2);x.fill()}
+   else{x.beginPath();x.moveTo(hp[0],hp[1]-hh*1.15);x.lineTo(hp[0]+hw*1.08,hp[1]+hh);x.lineTo(hp[0]-hw*1.08,hp[1]+hh);x.closePath();x.fill()}
+   x.globalCompositeOperation='source-over';
+
+   // Space is visibly behind/inside every hole.
+   drawNextRoomThroughHole(w,hp[0],hp[1],hw,hh,(w.shape===6?0:w.shape));
+
+   x.strokeStyle='#fff';x.lineWidth=Math.max(1.5,3*s);
+   if(w.shape===0||w.shape===6)x.strokeRect(hp[0]-hw,hp[1]-hh,hw*2,hh*2);
+   else if(w.shape===1){x.beginPath();x.ellipse(hp[0],hp[1],hw,hh,0,0,Math.PI*2);x.stroke()}
+   else{x.beginPath();x.moveTo(hp[0],hp[1]-hh*1.15);x.lineTo(hp[0]+hw*1.08,hp[1]+hh);x.lineTo(hp[0]-hw*1.08,hp[1]+hh);x.closePath();x.stroke()}
+
+   let pulse=.45+.35*Math.sin(t*5+w.phase);
+   x.shadowBlur=Math.max(6,24*s);x.shadowColor='#66efff';
+   x.strokeStyle=`rgba(155,248,255,${Math.max(.38,pulse)})`;x.lineWidth=Math.max(1,3*s);
+   if(w.shape===0||w.shape===6)x.strokeRect(hp[0]-hw-3*s,hp[1]-hh-3*s,hw*2+6*s,hh*2+6*s);
+   else if(w.shape===1){x.beginPath();x.ellipse(hp[0],hp[1],hw+3*s,hh+3*s,0,0,Math.PI*2);x.stroke()}
+   else{x.beginPath();x.moveTo(hp[0],hp[1]-hh*1.15-3*s);x.lineTo(hp[0]+hw*1.08+3*s,hp[1]+hh+3*s);x.lineTo(hp[0]-hw*1.08-3*s,hp[1]+hh+3*s);x.closePath();x.stroke()}
+   x.shadowBlur=0;
+ }
+ x.restore();
+}
+function drawTarget(){}
+
+function drawThresholdCrossing(dt){
+ if(crossFX<=0 || !crossWall)return;
+
+ // Faster flight makes the same physical crossing happen faster.
+ let duration=Math.max(.055,.16-speed/5200);
+ crossFX=Math.max(0,crossFX-dt/duration);
+ let q=1-crossFX;
+
+ x.save();
+
+ // The opening starts around the player's view and rapidly expands beyond the screen,
+ // which creates the sensation that the wall plane is passing around and behind us.
+ let cx=W/2,cy=H*.52;
+ let baseW=W*.18,baseH=H*.16;
+ let scale=1+q*q*9.5;
+ let hw=baseW*scale,hh=baseH*scale;
+
+ // Dark metallic wall material occupies ONLY the peripheral area outside the opening.
+ x.fillStyle=`rgba(12,24,35,${.72*(1-q)})`;
+ x.beginPath();
+ x.rect(0,0,W,H);
+
+ // Punch out an expanding center aperture using even-odd fill.
+ if(crossWall.shape===1){
+   x.moveTo(cx+hw,cy);
+   x.ellipse(cx,cy,hw,hh,0,0,Math.PI*2,true);
+ }else if(crossWall.shape===2){
+   x.moveTo(cx,cy-hh*1.15);
+   x.lineTo(cx-hw*1.08,cy+hh);
+   x.lineTo(cx+hw*1.08,cy+hh);
+   x.closePath();
+ }else{
+   x.rect(cx-hw,cy-hh,hw*2,hh*2);
+ }
+ x.fill('evenodd');
+
+ // Bright rim of the wall rushing through peripheral vision.
+ let a=Math.max(0,1-q);
+ x.shadowBlur=18;x.shadowColor='#62efff';
+ x.strokeStyle=`rgba(115,242,255,${a*.9})`;
+ x.lineWidth=3+q*7;
+ if(crossWall.shape===1){
+   x.beginPath();x.ellipse(cx,cy,hw,hh,0,0,Math.PI*2);x.stroke();
+ }else if(crossWall.shape===2){
+   x.beginPath();x.moveTo(cx,cy-hh*1.15);x.lineTo(cx+hw*1.08,cy+hh);x.lineTo(cx-hw*1.08,cy+hh);x.closePath();x.stroke();
+ }else{
+   x.strokeRect(cx-hw,cy-hh,hw*2,hh*2);
+ }
+
+ // Peripheral perspective streaks move outward, never covering the next room center.
+ for(let i=0;i<14;i++){
+   let ang=(i/14)*Math.PI*2;
+   let inner=55+q*85,outer=inner+35+q*115;
+   x.strokeStyle=i%3===0?`rgba(198,95,255,${a*.42})`:`rgba(85,235,255,${a*.42})`;
+   x.lineWidth=1.5+q*2;
+   x.beginPath();
+   x.moveTo(cx+Math.cos(ang)*inner,cy+Math.sin(ang)*inner);
+   x.lineTo(cx+Math.cos(ang)*outer,cy+Math.sin(ang)*outer);
+   x.stroke();
+ }
+ x.restore();
+
+ if(crossFX<=0)crossWall=null;
+}
+
+function dart(){
+ let cx=W/2,cy=H*.66;
+ let dx=targetPX-px,dy=targetPY-py;
+ let bank=Math.max(-.38,Math.min(.38,dx*.32));
+ let pitch=Math.max(-8,Math.min(8,dy*18));
+ let bob=Math.sin(t*7)*1.5;
+ x.save();x.translate(cx,cy+bob+pitch);x.rotate(bank);
+
+ // Twin ion exhausts.
+ for(let side of [-1,1]){
+   let ex=side*11;
+   let eg=x.createLinearGradient(ex,15,ex,92);
+   eg.addColorStop(0,'rgba(225,255,255,.95)');
+   eg.addColorStop(.18,'rgba(65,235,255,.85)');
+   eg.addColorStop(1,'rgba(40,90,255,0)');
+   x.fillStyle=eg;x.beginPath();x.moveTo(ex-5,15);x.lineTo(ex+5,15);x.lineTo(ex+9,92);x.lineTo(ex-9,92);x.closePath();x.fill();
+ }
+
+ // Wide swept-wing hull.
+ x.shadowBlur=15;x.shadowColor='#58eaff';
+ let hull=x.createLinearGradient(-38,-22,38,25);
+ hull.addColorStop(0,'#6f8296');hull.addColorStop(.45,'#e4edf4');hull.addColorStop(1,'#526477');
+ x.fillStyle=hull;x.beginPath();
+ x.moveTo(0,-30);x.lineTo(13,-11);x.lineTo(42,5);x.lineTo(48,13);
+ x.lineTo(23,11);x.lineTo(17,25);x.lineTo(7,19);x.lineTo(0,28);
+ x.lineTo(-7,19);x.lineTo(-17,25);x.lineTo(-23,11);x.lineTo(-48,13);
+ x.lineTo(-42,5);x.lineTo(-13,-11);x.closePath();x.fill();
+
+ // Dark lower wing panels.
+ x.fillStyle='#263847';
+ x.beginPath();x.moveTo(-43,7);x.lineTo(-17,1);x.lineTo(-9,13);x.lineTo(-25,15);x.closePath();x.fill();
+ x.beginPath();x.moveTo(43,7);x.lineTo(17,1);x.lineTo(9,13);x.lineTo(25,15);x.closePath();x.fill();
+
+ // Glass canopy.
+ let canopy=x.createLinearGradient(0,-23,0,10);
+ canopy.addColorStop(0,'#bdf8ff');canopy.addColorStop(.35,'#24718e');canopy.addColorStop(1,'#0a2639');
+ x.fillStyle=canopy;x.beginPath();x.moveTo(0,-23);x.lineTo(10,-3);x.lineTo(6,11);x.lineTo(-6,11);x.lineTo(-10,-3);x.closePath();x.fill();
+ x.strokeStyle='rgba(180,250,255,.8)';x.lineWidth=1.5;x.stroke();
+
+ // Hull seams / glowing wing channels.
+ x.shadowBlur=8;x.shadowColor='#5cecff';x.strokeStyle='#66eaff';x.lineWidth=2;
+ x.beginPath();x.moveTo(-39,10);x.lineTo(-18,7);x.lineTo(-10,15);x.stroke();
+ x.beginPath();x.moveTo(39,10);x.lineTo(18,7);x.lineTo(10,15);x.stroke();
+ x.beginPath();x.moveTo(0,-27);x.lineTo(0,-18);x.stroke();
+
+ // Engine cores.
+ x.fillStyle='#d9ffff';x.shadowBlur=14;x.shadowColor='#6af5ff';
+ x.beginPath();x.arc(-11,19,5.5,0,Math.PI*2);x.fill();
+ x.beginPath();x.arc(11,19,5.5,0,Math.PI*2);x.fill();
+
+ // Navigation lights.
+ x.shadowBlur=10;x.fillStyle='#ff5278';x.shadowColor='#ff5278';x.beginPath();x.arc(-42,10,2.5,0,Math.PI*2);x.fill();
+ x.fillStyle='#65ffcb';x.shadowColor='#65ffcb';x.beginPath();x.arc(42,10,2.5,0,Math.PI*2);x.fill();
+ x.restore();
+}
+function explosionFrame(startTime){
+ exploding=true;
+ let now=performance.now(),elapsed=(now-startTime)/1000;
+
+ // Draw the frozen world behind the explosion.
+ corridor();drawTarget();
+ let scene=[...walls.map(w=>({z:w.z,type:'wall',v:w})),
+            ...objects.map(o=>({z:o.z,type:'obj',v:o})),
+            ...roomShapes.map(o=>({z:o.z,type:'shape',v:o}))].sort((a,b)=>b.z-a.z);
+ for(const item of scene){
+   if(item.type==='obj')drawObject(item.v);
+   else if(item.type==='shape')drawRoomShape(item.v);
+   else drawWall(item.v);
+ }
+
+ let cx=W/2,cy=H*.66,r=18+elapsed*155;
+ let g=x.createRadialGradient(cx,cy,2,cx,cy,r);
+ g.addColorStop(0,'rgba(255,255,230,1)');
+ g.addColorStop(.18,'rgba(255,230,80,.98)');
+ g.addColorStop(.48,'rgba(255,105,20,.92)');
+ g.addColorStop(.76,'rgba(190,25,5,.58)');
+ g.addColorStop(1,'rgba(25,5,0,0)');
+ x.fillStyle=g;x.beginPath();x.arc(cx,cy,r,0,Math.PI*2);x.fill();
+
+ // The spacecraft physically breaks apart inside the fireball.
+ let debrisAlpha=Math.max(0,1-elapsed/1.05);
+ let pieces=[
+   {a:-2.65,v:105,rot:4.2,w:28,h:8},   // left wing
+   {a:-.48,v:112,rot:-5.0,w:28,h:8},   // right wing
+   {a:-1.52,v:82,rot:3.1,w:12,h:22},   // nose/canopy
+   {a:1.92,v:92,rot:-4.4,w:13,h:12},   // engine
+   {a:.82,v:98,rot:5.3,w:13,h:12}      // engine
+ ];
+ for(let k=0;k<pieces.length;k++){
+   let d=pieces[k],dist=elapsed*d.v;
+   let dx=Math.cos(d.a)*dist,dy=Math.sin(d.a)*dist+elapsed*elapsed*45;
+   x.save();x.translate(cx+dx,cy+dy);x.rotate(elapsed*d.rot+k*.35);
+   x.globalAlpha=debrisAlpha;
+   let dg=x.createLinearGradient(-d.w/2,-d.h/2,d.w/2,d.h/2);
+   dg.addColorStop(0,'#d8e5ee');dg.addColorStop(.5,'#62788a');dg.addColorStop(1,'#202c36');
+   x.fillStyle=dg;x.fillRect(-d.w/2,-d.h/2,d.w,d.h);
+   x.strokeStyle=k<2?'#62eaff':'#ff9d32';x.lineWidth=1.5;x.strokeRect(-d.w/2,-d.h/2,d.w,d.h);
+   // burning edge / sparks on wreckage
+   x.shadowBlur=8;x.shadowColor='#ff6a18';x.fillStyle='#ff8b20';
+   x.beginPath();x.arc(-d.w*.25,d.h*.25,2.5,0,Math.PI*2);x.fill();
+   x.restore();
+ }
+ x.globalAlpha=1;
+
+ for(let i=0;i<30;i++){
+   let a=i*2.399+(i%4)*.18,v=55+(i%7)*20,dist=elapsed*v;
+   let sx=cx+Math.cos(a)*dist,sy=cy+Math.sin(a)*dist;
+   let rr=Math.max(1,5-elapsed*4)+(i%3);
+   x.fillStyle=i%3===0?'#fff3a0':i%3===1?'#ff9d22':'#ff4a16';
+   x.globalAlpha=Math.max(0,1-elapsed/1.0);
+   x.beginPath();x.arc(sx,sy,rr,0,Math.PI*2);x.fill();
+ }
+ x.globalAlpha=1;
+
+ x.strokeStyle=`rgba(170,235,255,${Math.max(0,.7-elapsed)})`;
+ x.lineWidth=Math.max(1,6-elapsed*4);
+ x.beginPath();x.arc(cx,cy,25+elapsed*210,0,Math.PI*2);x.stroke();
+
+ if(elapsed<.70){
+   requestAnimationFrame(()=>explosionFrame(startTime));
+ }else{
+   finishCrash();
+ }
+}
+
+function restartAttempt(){
+ // Same course attempt from the beginning; remaining lives are preserved.
+ exploding=false;invulnUntil=0;crossFX=0;crossWall=null;
+ build();
+ z=0;px=0;py=0;targetPX=0;targetPY=0;
+ speed=40+(level-1)*4;
+ score=0;lastRoom=-1;roomNotice='';roomNoticeUntil=0;
+ msg.classList.add('hide');
+ run=true;last=performance.now();
+ requestAnimationFrame(loop);
+}
+
+function start(){
+ lives=3;
+ restartAttempt();
+}
+document.getElementById('start').onclick=start;
+
+function fingerToWorld(e){
+  targetPX=((e.clientX/W)-.5)*4.35;
+  targetPY=((e.clientY/H)-.50)*2.25;
+  targetPX=Math.max(-1.65,Math.min(1.65,targetPX));
+  targetPY=Math.max(-.72,Math.min(.72,targetPY));
+}
+c.addEventListener('pointerdown',e=>{e.preventDefault();drag=true;fingerToWorld(e);c.setPointerCapture(e.pointerId)});
+c.addEventListener('pointermove',e=>{if(drag){e.preventDefault();fingerToWorld(e)}});
+c.addEventListener('pointerup',e=>{e.preventDefault();drag=false});
+c.addEventListener('pointercancel',()=>drag=false);
+c.addEventListener('contextmenu',e=>e.preventDefault());
+
+
+function crash(){
+ if(exploding || performance.now()<invulnUntil)return;
+ run=false;
+ exploding=true;
+ explosionFrame(performance.now());
+}
+
+function finishCrash(){
+ exploding=false;
+ lives--;
+
+ if(lives>0){
+   msg.innerHTML=`<h1>💥 PROTOTYPE LOST</h1>
+   <p><b>${lives} ${lives===1?'LIFE':'LIVES'} REMAINING</b><br><br>Restarting Test Course 01...</p>`;
+   msg.classList.remove('hide');
+   setTimeout(()=>restartAttempt(),850);
+ }else{
+   // No lives remain: return to the normal play/start screen rather than freezing.
+   run=false;
+   msg.innerHTML=`<h1>TEST COURSE 01</h1>
+   <p>All prototypes lost.<br><br>Best Score <b>${bestScore.toLocaleString()}</b></p>
+   <button id="again">PLAY</button>`;
+   msg.classList.remove('hide');
+   document.getElementById('again').onclick=start;
+ }
+}
+
+function win(){
+ run=false;
+ score+=lives*500;
+ if(score>bestScore){bestScore=score;localStorage.setItem('testPilotBest',String(bestScore));}
+ let trophy=score>=6500?'🏆 GOLD TEST PILOT':score>=4500?'🥈 SILVER TEST PILOT':'🥉 BRONZE TEST PILOT';
+ msg.innerHTML=`<h1>${trophy}</h1>
+ <p>COURSE COMPLETE<br><br>
+ <b>SCORE ${score.toLocaleString()}</b><br>
+ BEST ${bestScore.toLocaleString()}<br>
+ LIVES REMAINING ${lives}/3</p>
+ <button id="again">FLY AGAIN</button>`;
+ msg.classList.remove('hide');
+ document.getElementById('again').onclick=start;
+}
+function loop(now){
+ if(!run)return;let dt=Math.min(.03,(now-last)/1000);last=now;t+=dt;
+ let follow=Math.min(1,dt*16.5);
+ px+=(targetPX-px)*follow;py+=(targetPY-py)*follow;
+ px=Math.max(-1.65,Math.min(1.65,px));py=Math.max(-.72,Math.min(.72,py));
+ let cleared=walls.reduce((n,w)=>n+(w.passed?1:0),0);
+ // Every cleared room raises the minimum pace. Extra rooms therefore create
+ // a noticeably faster late-game without making the opening unfair.
+ speed=Math.min(620,Math.max(speed,40+cleared*6.4+level*4));
+ speed=Math.min(620,speed+(7.0+level*.9+cleared*.36)*dt);z+=speed*dt;
+
+ let cr=currentRoom();
+ if(cr!==lastRoom){
+   lastRoom=cr;
+   let ac=objects.filter(o=>o.room===cr).length;
+   let sc=roomShapes.filter(o=>o.room===cr).length;
+   roomNotice=ac?'ASTEROID SECTOR':sc?'TEST OBSTACLES':'CLEAR SECTOR';
+   roomNoticeUntil=performance.now()+650;
+ }
+ corridor();drawTarget();
+ let scene=[...walls.map(w=>({z:w.z,type:'wall',v:w})),...objects.map(o=>({z:o.z,type:'obj',v:o})),...roomShapes.map(o=>({z:o.z,type:'shape',v:o}))].sort((a,b)=>b.z-a.z);
+ for(const item of scene){if(item.type==='obj')drawObject(item.v);else if(item.type==='shape')drawRoomShape(item.v);else drawWall(item.v);}[...objects].sort((a,b)=>b.z-a.z).forEach(drawObject);
+ for(const o of roomShapes)if(!o.passed&&o.room===currentRoom()&&(o.z-z)<=54){
+ let dx=px-o.x,dy=py-o.y;
+ let rx=o.kind===0?o.size*.72:o.size+0.09;
+ let ry=o.kind===0?o.size*1.38:o.size+0.09;
+ let hit=o.kind===1 ? Math.hypot(dx,dy)<rx : (Math.abs(dx)<rx&&Math.abs(dy)<ry);
+ if(hit)return crash();
+ o.passed=true;score+=75;
+}
+for(const o of objects)if(!o.passed&&o.room===currentRoom()&&(o.z-z)<=54){
+ let [ox,oy]=objectPos(o),dx=px-ox,dy=py-oy;
+ let radius=o.size+.105;
+ if(Math.hypot(dx,dy)<radius)return crash();
+ o.passed=true;
+}
+ for(const w of walls)if(!w.passed&&(w.z-z)<=38){
+ let[hx,hy]=hole(w),dx=px-hx,dy=py-hy;
+ let ok;
+ if(w.shape>=3 && w.shape!==6){
+   let routes=[];
+   if(w.shape===3) routes=[[-.72,0,.18,.285],[0,0,.18,.285],[.72,0,.18,.285]];
+   if(w.shape===4) routes=[[-.58,-.24,.22,.17],[.58,.24,.22,.17],[-.58,.24,.22,.17],[.58,-.24,.22,.17]];
+   if(w.shape===5) routes=[[-.78,.24,.19,.17],[0,-.24,.19,.17],[.78,.24,.19,.17]];
+   if(w.shape===7) routes=[[-.66,0,.145,.50],[0,0,.145,.50],[.66,0,.145,.50]];
+   let ap=apertureScale();
+   // Craft collision core is narrower than the rendered swept wings.
+   // Give the visible opening a small edge tolerance so a visually clean pass counts.
+   ok=routes.some(r=>Math.abs(px-r[0])<r[2]*ap*1.22 && Math.abs(py-r[1])<r[3]*ap*1.20);
+ } else {
+   let ap=apertureScale(),precision=(w.shape===6?.72:1);
+   // Visual-fit rule: if the ship's central fuselage is clearly through the hole,
+   // count the pass. The decorative wings do not cause an invisible collision.
+   let tolX=.235*precision*ap*1.24;
+   let tolY=.19*precision*ap*1.22;
+   ok=Math.abs(dx)<tolX && Math.abs(dy)<tolY;
+
+   // Moving-hole sweep tolerance:
+   // between frames a fast moving aperture can cross the craft even if its sampled
+   // center is slightly beyond the strict boundary. Check a tiny time step backward
+   // and forward so what the player actually saw on screen is honored.
+   if(!ok && w.style>0){
+     let saveT=t;
+     t=saveT-.035;let hp0=hole(w);
+     t=saveT+.035;let hp1=hole(w);
+     t=saveT;
+     ok=(Math.abs(px-hp0[0])<tolX && Math.abs(py-hp0[1])<tolY) ||
+        (Math.abs(px-hp1[0])<tolX && Math.abs(py-hp1[1])<tolY);
+   }
+ }
+ if(ok){
+   // Capture the threshold so we can visually fly THROUGH it for a few frames.
+   crossFX=1;
+   crossWall={shape:w.shape,style:w.style,phase:w.phase||0};
+   w.passed=true;
+   invulnUntil=Math.max(invulnUntil,performance.now()+120);
+   score+=100+Math.round(speed*.5);
+   w.z=z-10;
+ } else return crash()
+}
+ if(z>=finishZ){win();return;}
+ if(performance.now()<roomNoticeUntil){
+   x.save();x.textAlign='center';x.font='800 15px system-ui';
+   x.fillStyle='rgba(210,245,255,.85)';x.shadowBlur=8;x.shadowColor='#5deaff';
+   x.fillText(roomNotice,W/2,H*.16);x.restore();
+ }
+ x.save();x.font='800 15px system-ui';x.textAlign='right';
+ x.fillStyle='rgba(220,248,255,.9)';x.shadowBlur=6;x.shadowColor='#55eaff';
+ x.fillText('LIVES  ' + '◆'.repeat(lives),W-18,30);x.restore();
+ x.save();x.font='800 15px system-ui';x.textAlign='left';
+ x.fillStyle='rgba(220,248,255,.9)';x.shadowBlur=6;x.shadowColor='#55eaff';
+ x.fillText('SCORE  '+score.toLocaleString(),18,30);x.restore();
+ drawThresholdCrossing(dt);
+ dart();bar.style.width=Math.min(100,z/finishZ*100)+'%';spd.textContent='SPEED '+Math.round(speed);requestAnimationFrame(loop)
+}
+</script></body></html>
